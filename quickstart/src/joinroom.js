@@ -4,6 +4,7 @@ const { connect, createLocalVideoTrack, Logger } = require('twilio-video');
 const { isMobile } = require('./browser');
 
 const $leave = $('#leave-room');
+const $startScreen = $('#start-sharing');
 const $room = $('#room');
 const $activeParticipant = $('div#active-participant > div.participant.main', $room);
 const $activeVideo = $('video', $activeParticipant);
@@ -15,6 +16,95 @@ let activeParticipant = null;
 // Whether the user has selected the active Participant by clicking on
 // one of the video thumbnails.
 let isActiveParticipantPinned = false;
+
+/**
+ * Updates the Network Quality report for a Participant.
+ */
+function updateNetworkQualityReport(participant) {
+  console.log("RECEIVED updateNetworkQualityReport", participant);
+  const participantDiv = document.getElementById(participant.sid);
+  $(participantDiv).attr("data-identity", `NQ Level (${participant.identity}): ${participant.networkQualityLevel}`);
+  /*
+    const title = participantDiv.querySelector('h6');
+    title.innerHTML = `NQ Level (${participant.identity}): ${participant.networkQualityLevel}`;
+    const stats = participantDiv.querySelector('textarea');
+    stats.value = `NQ Stats:\r\n========\r\n${JSON.stringify(participant.networkQualityStats, null, 2)}`;
+    */
+}
+
+var Video = require('twilio-video');
+
+/**
+ * Connect to a Room with the Network Quality API enabled.
+ * This API is available only in Small Group or Group Rooms.
+ * @param {string} token - Token for joining the Room
+ * @param {number} localVerbosity - Verbosity level of Network Quality reports
+ *   for the LocalParticipant [1 - 3]
+ * @param {number} remoteVerbosity - Verbosity level of Network Quality reports
+ *   for the RemoteParticipant(s) [0 - 3]
+ * @returns {CancelablePromise<Room>}
+ */
+function connectToRoomWithNetworkQuality(token, localVerbosity, remoteVerbosity) {
+  return Video.connect(token, {
+    networkQuality: {
+      local: localVerbosity,
+      remote: remoteVerbosity
+    }
+  });
+}
+
+/**
+ * Listen to changes in the Network Quality report of a Participant and update
+ * your application.
+ * @param {Participant} participant - The Participant whose updates you want to listen to
+ * @param {function} updateNetworkQualityReport - Updates the app UI with the new
+ *   Network Quality report of the Participant.
+ * @returns {void}
+ */
+function setupNetworkQualityUpdatesForParticipant(participant, updateNetworkQualityReport) {
+  updateNetworkQualityReport(participant);
+  participant.on('networkQualityLevelChanged', function () {
+    updateNetworkQualityReport(participant);
+  });
+}
+
+/**
+ * Listen to changes in the Network Quality reports and update your application.
+ * @param {Room} room - The Room you just joined
+ * @param {function} updateNetworkQualityReport - Updates the app UI with the new
+ *   Network Quality report of a Participant.
+ * @returns {void}
+ */
+function setupNetworkQualityUpdates(room, updateNetworkQualityReport) {
+  // Listen to changes in Network Quality level of the LocalParticipant.
+  setupNetworkQualityUpdatesForParticipant(room.localParticipant, updateNetworkQualityReport);
+  // Listen to changes in Network Quality levels of RemoteParticipants already
+  // in the Room.
+  room.participants.forEach(function (participant) {
+    setupNetworkQualityUpdatesForParticipant(participant, updateNetworkQualityReport);
+  });
+  // Listen to changes in Network Quality levels of RemoteParticipants that will
+  // join the Room in the future.
+  room.on('participantConnected', function (participant) {
+    setupNetworkQualityUpdatesForParticipant(participant, updateNetworkQualityReport);
+  });
+}
+
+/**
+ * Change the local and remote Network Quality verbosity levels after joining the Room.
+ * @param {Room} room - The Room you just joined
+ * @param {number} localVerbosity - Verbosity level of Network Quality reports
+ *   for the LocalParticipant [1 - 3]
+ * @param {number} remoteVerbosity - Verbosity level of Network Quality reports
+ *   for the RemoteParticipant(s) [0 - 3]
+ * @returns {void}
+ */
+function setNetworkQualityConfiguration(room, localVerbosity, remoteVerbosity) {
+  room.localParticipant.setNetworkQualityConfiguration({
+    local: localVerbosity,
+    remote: remoteVerbosity
+  });
+}
 
 /**
  * Set the active Participant's video.
@@ -227,6 +317,10 @@ async function joinRoom(token, connectOptions) {
   logger.setLevel('debug');
 
   // Join to the Room with the given AccessToken and ConnectOptions.
+  connectOptions.networkQuality = {
+    local: 3,
+    remote: 3
+  };
   const room = await connect(token, connectOptions);
 
   // Save the LocalVideoTrack.
@@ -264,10 +358,33 @@ async function joinRoom(token, connectOptions) {
     }
   });
 
+  setupNetworkQualityUpdates(room, updateNetworkQualityReport);
+
   // Leave the Room when the "Leave Room" button is clicked.
   $leave.click(function onLeave() {
     $leave.off('click', onLeave);
     room.disconnect();
+  });
+
+  // Leave the Room when the "Leave Room" button is clicked.
+  $startScreen.click(function onStartScreen() {
+    const Video = require('twilio-video');
+    function createScreenTrack(height, width) {
+      if (typeof navigator === 'undefined'
+        || !navigator.mediaDevices
+        || !navigator.mediaDevices.getDisplayMedia) {
+        return Promise.reject(new Error('getDisplayMedia is not supported'));
+      }
+      return navigator.mediaDevices.getDisplayMedia({
+        video: {
+          height: height,
+          width: width
+        }
+      }).then(function (stream) {
+        return new Video.LocalVideoTrack(stream.getVideoTracks()[0]);
+      });
+    }
+    createScreenTrack(1366, 768).then((screen) => room.localParticipant.publishTrack(screen));
   });
 
   return new Promise((resolve, reject) => {
